@@ -1,0 +1,405 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>NZM IPTV — Admin Panel</title>
+
+  <!-- Firebase (Realtime DB) -->
+  <script src="https://www.gstatic.com/firebasejs/11.0.0/firebase-app.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/11.0.0/firebase-database.js"></script>
+
+  <style>
+    :root{ --accent: #00ffff; --bg: #071217; --card: #071a1f; --muted:#9bdede; }
+    body{ margin:0; font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, Arial; background:linear-gradient(180deg,#001216 0%, #02161a 100%); color:#e6fdfd; min-height:100vh; padding:24px; }
+    header{ display:flex; gap:16px; align-items:center; margin-bottom:18px; }
+    h1{ font-size:20px; margin:0; color:var(--accent); }
+    p.lead{ margin:0; color:var(--muted); font-size:13px; }
+
+    .toolbar{ margin-top:12px; display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+    .btn{ background:var(--accent); color:#002; border:none; padding:8px 12px; border-radius:8px; cursor:pointer; font-weight:600; }
+    .btn.ghost{ background:transparent; border:1px solid rgba(255,255,255,0.06); color:#cfffff; }
+    .btn.warn{ background:#ffb86b; color:#111; }
+    input[type=search]{ background:#022427; border:1px solid rgba(255,255,255,0.04); padding:8px 10px; border-radius:8px; color:#dff; }
+
+    .card{ background: linear-gradient(180deg, rgba(0,0,0,0.18), rgba(0,0,0,0.06)); border-radius:12px; padding:14px; box-shadow: 0 8px 30px rgba(0,0,0,0.6); margin-top:12px; border:1px solid rgba(0,255,255,0.06); }
+
+    table{ width:100%; border-collapse:collapse; font-size:13px; }
+    thead th{ text-align:left; padding:10px 8px; color:var(--accent); font-weight:700; }
+    tbody td{ padding:10px 8px; border-top:1px solid rgba(255,255,255,0.02); vertical-align:middle; }
+    .muted{ color:#9bdede; font-size:12px; }
+    .idbox{ font-family:monospace; padding:6px 8px; background:#001b1b; border-radius:6px; display:inline-block; color:var(--accent); }
+
+    .status-pill{ padding:6px 8px; border-radius:999px; font-weight:700; font-size:12px; display:inline-flex; gap:8px; align-items:center; }
+    .status-active{ background:rgba(0,255,170,0.12); color:#baffd8; border:1px solid rgba(0,255,170,0.08); }
+    .status-expired{ background:rgba(255,200,100,0.06); color:#ffdfa9; border:1px solid rgba(255,200,100,0.06); }
+    .status-off{ background:rgba(255,80,80,0.06); color:#ffc6c6; border:1px solid rgba(255,80,80,0.04); }
+
+    input[type="datetime-local"]{ padding:6px 8px; border-radius:8px; border:1px solid rgba(255,255,255,0.03); background:#021d1d; color:#dff; }
+    .small{ font-size:12px; color:#cfe; }
+    .actions{ display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+
+    .row{ display:flex; gap:12px; align-items:center; }
+    footer{ margin-top:20px; color:#93e7e7; font-size:12px; opacity:0.9; }
+
+    @media (max-width:900px){
+      table{ font-size:12px; }
+      thead th, tbody td{ padding:8px 6px; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>NZM IPTV — Admin Panel</h1>
+      <p class="lead">Manage device approvals & expirations (Realtime). Deploy this file to GitHub Pages.</p>
+    </div>
+  </header>
+
+  <div class="card">
+    <div class="toolbar">
+      <button id="refreshBtn" class="btn ghost">Refresh</button>
+      <button id="scanExpireBtn" class="btn ghost">Force-scan expired</button>
+      <button id="createBtn" class="btn">Create Device</button>
+      <input id="searchInput" type="search" placeholder="Search Device ID..." style="margin-left:auto;">
+      <label style="display:flex;align-items:center;gap:8px;">
+        <input id="showAllToggle" type="checkbox" checked> Show all
+      </label>
+    </div>
+
+    <div style="overflow:auto;margin-top:12px;">
+      <table id="devicesTable" role="table" aria-label="Devices">
+        <thead>
+          <tr>
+            <th>Device ID</th>
+            <th>Status</th>
+            <th>Expires At (UTC)</th>
+            <th>Created</th>
+            <th>Last Seen</th>
+            <th style="width:320px">Actions</th>
+          </tr>
+        </thead>
+        <tbody id="devicesTbody">
+          <!-- rows injected here -->
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <footer>
+    <div style="margin-top:12px;">
+      Note: This admin panel is intentionally open (no auth). Anyone with the link can modify devices. Use Firebase rules or add auth if you need security.
+    </div>
+  </footer>
+
+<script>
+  // ---------------------------
+  // Firebase config — same project as your app
+  // ---------------------------
+  const firebaseConfig = {
+    apiKey: "AIzaSyC2WerQR0ns5Nb884VC3hLLUjo9zmHum4I",
+    authDomain: "device-id-fa609.firebaseapp.com",
+    databaseURL: "https://device-id-fa609-default-rtdb.asia-southeast1.firebasedatabase.app",
+    projectId: "device-id-fa609",
+    storageBucket: "device-id-fa609.firebasestorage.app",
+    messagingSenderId: "692838888581",
+    appId: "1:692838888581:web:89100b9eb9b0e75fac65ec",
+    measurementId: "G-20S0EJ950Z"
+  };
+  // Initialize firebase (namespaced API; matches index.html usage)
+  const app = firebase.initializeApp(firebaseConfig);
+  const db = firebase.database();
+
+  // ---------------------------
+  // UI refs
+  // ---------------------------
+  const devicesTbody = document.getElementById('devicesTbody');
+  const refreshBtn = document.getElementById('refreshBtn');
+  const createBtn = document.getElementById('createBtn');
+  const searchInput = document.getElementById('searchInput');
+  const scanExpireBtn = document.getElementById('scanExpireBtn');
+  const showAllToggle = document.getElementById('showAllToggle');
+
+  // state
+  let devicesSnapshot = {}; // local mirror of data
+  let devicesListener = null;
+
+  // utility: format ISO -> nice local string (or '-' if null)
+  function fmtLocal(iso){
+    if(!iso) return '—';
+    try {
+      const d = new Date(iso);
+      if(isNaN(d)) return iso;
+      return d.toISOString().replace('T',' ').replace('Z',' UTC');
+    } catch(e){ return iso; }
+  }
+
+  // utility: check if expired (given iso string)
+  function isExpired(iso){
+    if(!iso) return false;
+    const t = Date.parse(iso);
+    if(isNaN(t)) return false;
+    return Date.now() > t;
+  }
+
+  // generate new device id
+  function genDeviceId(){
+    return "DEV-" + Math.random().toString(36).substring(2, 10).toUpperCase();
+  }
+
+  // render rows based on devicesSnapshot and filter/search
+  function renderDevices(){
+    const q = (searchInput.value || '').trim().toLowerCase();
+    const showAll = showAllToggle.checked;
+    devicesTbody.innerHTML = '';
+    const keys = Object.keys(devicesSnapshot).sort((a,b)=> {
+      const A = devicesSnapshot[a]?.createdAt || '';
+      const B = devicesSnapshot[b]?.createdAt || '';
+      return (B > A) ? 1 : -1;
+    });
+
+    if(keys.length === 0){
+      devicesTbody.innerHTML = '<tr><td colspan="6" class="muted" style="padding:20px">No devices yet.</td></tr>';
+      return;
+    }
+
+    keys.forEach(id => {
+      const d = devicesSnapshot[id] || {};
+      const approved = !!d.approved;
+      const expiresAt = d.expiresAt || null;
+      const expired = expiresAt ? isExpired(expiresAt) : false;
+
+      // quick filter: if not showAll and not approved and not expired, hide (optional)
+      if(!showAll && !approved) return;
+      if(q && !id.toLowerCase().includes(q)) return;
+
+      // status
+      let statusClass = 'status-off', statusText = 'Not approved';
+      if(approved && !expired){ statusClass='status-active'; statusText='Active'; }
+      else if(approved && expired){ statusClass='status-expired'; statusText='Expired'; }
+
+      const tr = document.createElement('tr');
+
+      tr.innerHTML = `
+        <td>
+          <div style="display:flex;gap:10px;align-items:center">
+            <div class="idbox">${id}</div>
+          </div>
+        </td>
+        <td>
+          <div class="status-pill ${statusClass}">${statusText}</div>
+        </td>
+        <td>
+          <div style="display:flex;flex-direction:column;gap:6px;">
+            <input type="datetime-local" data-id="${id}" value="${expiresAt ? toLocalDatetimeValue(expiresAt) : ''}" />
+            <div class="small muted">${expiresAt ? fmtLocal(expiresAt) : 'No expiration'}</div>
+          </div>
+        </td>
+        <td><div class="muted">${d.createdAt ? fmtLocal(d.createdAt) : '—'}</div></td>
+        <td><div class="muted">${d.lastSeen ? fmtLocal(d.lastSeen) : '—'}</div></td>
+        <td>
+          <div class="actions">
+            <button class="btn ghost" data-act="toggle" data-id="${id}">${approved ? 'Unapprove' : 'Approve'}</button>
+            <button class="btn" data-act="save" data-id="${id}">Save</button>
+            <button class="btn ghost" data-act="copy" data-id="${id}">Copy ID</button>
+            <button class="btn warn" data-act="delete" data-id="${id}">Delete</button>
+          </div>
+        </td>
+      `;
+
+      devicesTbody.appendChild(tr);
+    });
+
+    // attach events (delegation approach)
+    attachRowListeners();
+  }
+
+  // helper: convert ISO to input[type=datetime-local] value (local time)
+  function toLocalDatetimeValue(iso){
+    if(!iso) return '';
+    const d = new Date(iso);
+    if(isNaN(d)) return '';
+    // produce "YYYY-MM-DDTHH:MM"
+    const pad = n => String(n).padStart(2,'0');
+    const YYYY = d.getFullYear();
+    const MM = pad(d.getMonth()+1);
+    const DD = pad(d.getDate());
+    const hh = pad(d.getHours());
+    const mm = pad(d.getMinutes());
+    return `${YYYY}-${MM}-${DD}T${hh}:${mm}`;
+  }
+
+  // convert input datetime-local (local) to ISO UTC string
+  function fromLocalDatetimeValueToISO(val){
+    if(!val) return null;
+    // val is like "2025-11-30T15:30"
+    const d = new Date(val);
+    if(isNaN(d)) return null;
+    return d.toISOString();
+  }
+
+  // attach listeners for buttons/inputs inside table (re-run after render)
+  function attachRowListeners(){
+    // btns
+    document.querySelectorAll('button[data-act]').forEach(btn => {
+      btn.onclick = async (ev) => {
+        const id = btn.getAttribute('data-id');
+        const act = btn.getAttribute('data-act');
+        if(act === 'toggle'){
+          await toggleApprove(id);
+        } else if(act === 'save'){
+          const input = document.querySelector(`input[type="datetime-local"][data-id="${id}"]`);
+          const iso = fromLocalDatetimeValueToISO(input.value);
+          await saveExpiration(id, iso);
+        } else if(act === 'copy'){
+          try {
+            await navigator.clipboard.writeText(id);
+            btn.textContent = 'Copied!';
+            setTimeout(()=>btn.textContent='Copy ID',1200);
+          } catch(e){
+            alert('Copy failed — please select the ID manually');
+          }
+        } else if(act === 'delete'){
+          if(!confirm('Delete device ' + id + ' ? This cannot be undone.')) return;
+          await deleteDevice(id);
+        }
+      };
+    });
+
+    // inputs: onchange -> auto save to DB when changed, but user can still press Save
+    document.querySelectorAll('input[type="datetime-local"][data-id]').forEach(inp => {
+      inp.onchange = () => {
+        // mark as dirty or auto-save
+      };
+    });
+  }
+
+  // Firebase operations
+  const devicesRef = db.ref('devices');
+
+  function startListening(){
+    if(devicesListener) devicesRef.off('value', devicesListener);
+    devicesListener = devicesRef.on('value', snap => {
+      const val = snap.val() || {};
+      devicesSnapshot = val;
+      renderDevices();
+    }, err => {
+      console.error('Realtime DB listener error', err);
+      alert('Realtime DB error: ' + (err && err.message || 'unknown'));
+    });
+  }
+
+  // Toggle approve/unapprove
+  async function toggleApprove(id){
+    const cur = devicesSnapshot[id] || {};
+    const newVal = !(cur.approved === true);
+    const updateObj = { approved: newVal };
+    try {
+      await devicesRef.child(id).update(updateObj);
+      // UI will update via listener
+    } catch(err){
+      console.error('toggleApprove failed', err);
+      alert('Failed to update approve: ' + err.message);
+    }
+  }
+
+  // Save expiration (iso string or null)
+  async function saveExpiration(id, iso){
+    const updateObj = { expiresAt: iso ? iso : null };
+    try {
+      await devicesRef.child(id).update(updateObj);
+      // immediate UI refresh via listener
+    } catch(err){
+      console.error('saveExpiration failed', err);
+      alert('Failed to save expiration: ' + err.message);
+    }
+  }
+
+  // Delete device
+  async function deleteDevice(id){
+    try {
+      await devicesRef.child(id).remove();
+    } catch(err){
+      console.error('deleteDevice failed', err);
+      alert('Failed to delete: ' + err.message);
+    }
+  }
+
+  // Create device & optionally copy id to clipboard
+  async function createDevice(){
+    const id = genDeviceId();
+    const payload = {
+      approved: false,
+      createdAt: new Date().toISOString(),
+      lastSeen: new Date().toISOString(),
+      expiresAt: null
+    };
+    try {
+      await devicesRef.child(id).set(payload);
+      try { await navigator.clipboard.writeText(id); } catch(e){}
+      alert('Device created: ' + id + '\n(Added to DB and copied to clipboard if supported.)');
+    } catch(err){
+      console.error('createDevice failed', err);
+      alert('Failed to create device: ' + err.message);
+    }
+  }
+
+  // Force-scan expired: unapprove any device where expiresAt < now and approved===true
+  async function forceScanAndDeactivateExpired(){
+    const all = devicesSnapshot || {};
+    const updates = {};
+    Object.keys(all).forEach(id => {
+      const d = all[id];
+      const expiresAt = d?.expiresAt || null;
+      if(expiresAt && isExpired(expiresAt) && d.approved === true){
+        updates[id + '/approved'] = false;
+      }
+    });
+    if(Object.keys(updates).length === 0){
+      alert('No active expired devices found.');
+      return;
+    }
+    try {
+      await db.ref().update(updates);
+      alert('Deactivated ' + Object.keys(updates).length + ' expired device(s).');
+    } catch(err){
+      console.error('forceScan failed', err);
+      alert('Failed to deactivate expired devices: ' + err.message);
+    }
+  }
+
+  // Auto-run: every minute, run scan & deactivate expired devices
+  setInterval(async () => {
+    try {
+      // build updates directly from current snapshot
+      const all = devicesSnapshot || {};
+      const updates = {};
+      Object.keys(all).forEach(id => {
+        const d = all[id];
+        const expiresAt = d?.expiresAt || null;
+        if(expiresAt && isExpired(expiresAt) && d.approved === true){
+          updates['devices/' + id + '/approved'] = false;
+        }
+      });
+      if(Object.keys(updates).length > 0){
+        await db.ref().update(updates);
+        console.log('Auto-deactivated expired devices:', Object.keys(updates));
+      }
+    } catch(e){
+      console.warn('Auto-scan error', e);
+    }
+  }, 60_000); // every 60s
+
+  // initial wiring
+  refreshBtn.onclick = () => { startListening(); alert('Refreshed listener.'); };
+  createBtn.onclick = () => createDevice();
+  scanExpireBtn.onclick = () => forceScanAndDeactivateExpired();
+  searchInput.oninput = () => renderDevices();
+
+  showAllToggle.onchange = () => renderDevices();
+
+  // start immediately
+  startListening();
+</script>
+</body>
+  </html>
