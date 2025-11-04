@@ -1,0 +1,345 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>NZM IPTV — Admin</title>
+  <meta name="theme-color" content="#071025" />
+  <style>
+    :root{
+      --bg:#071025;--card:#08112e;--muted:#9fb3ff;
+      --accent1:#1f80ff;--text:#e6f2ff;
+    }
+    body{margin:0;font-family:Inter,Arial,sans-serif;background:linear-gradient(180deg,#020616,#071025);color:var(--text);padding:18px;}
+    .wrap{max-width:980px;margin:18px auto;background:var(--card);padding:18px;border-radius:12px;box-shadow:0 10px 40px rgba(0,0,0,0.6);}
+    h1{margin:0 0 12px 0;color:var(--accent1)}
+    .row{display:flex;gap:12px;align-items:center;margin-bottom:12px;}
+    input, select{padding:8px;border-radius:8px;border:1px solid rgba(255,255,255,0.04);background:transparent;color:var(--text)}
+    button{padding:8px 12px;border-radius:8px;border:none;background:linear-gradient(90deg,var(--accent1),#0062ff);color:#fff;cursor:pointer}
+    table{width:100%;border-collapse:collapse;margin-top:12px}
+    th,td{padding:8px;border-bottom:1px solid rgba(255,255,255,0.04);text-align:left;font-size:13px}
+    .muted{color:var(--muted);font-size:13px}
+    .small{font-size:12px;padding:6px 8px;border-radius:6px}
+    .danger{background:#ff4d4d}
+    .success{background:#22c55e}
+    .info{background:#3b82f6}
+    .flex-row{display:flex;gap:8px;align-items:center}
+    .note{font-size:13px;color:#cbd8ff;margin-top:8px}
+    .search{margin-left:auto}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>NZM IPTV — Admin Panel</h1>
+
+    <div class="row">
+      <div>
+        <label class="muted">Create account (Recommended: server mode)</label>
+        <div style="display:flex;gap:8px;margin-top:6px">
+          <input id="newEmail" placeholder="user@example.com" style="width:260px" />
+          <input id="newPassword" placeholder="temporary password" style="width:180px" />
+          <input id="newExpires" type="datetime-local" style="width:220px" />
+          <button id="createBtn">Create</button>
+        </div>
+        <div class="note">
+          If you set ADMIN_API_URL below, the panel will POST to your server to create the Auth account & DB record.
+        </div>
+      </div>
+
+      <div class="search">
+        <input id="filterInput" placeholder="Filter by email..." />
+      </div>
+    </div>
+
+    <div class="row">
+      <label class="muted">Admin server endpoint (optional):</label>
+      <input id="adminApi" placeholder="https://us-central1-...cloudfunctions.net/createUser" style="width:640px" />
+    </div>
+
+    <div class="row">
+      <button id="refreshBtn">Refresh users</button>
+      <div class="muted small" id="status">Status: Idle</div>
+    </div>
+
+    <table id="usersTable">
+      <thead>
+        <tr><th>Email / UID</th><th>Approved</th><th>Expires</th><th>Devices</th><th>Actions</th></tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+
+    <div class="note">
+      <strong>Important:</strong> creating Firebase Auth users from a browser client is not recommended. Use a server-side Cloud Function (example provided) and supply the endpoint URL above. If you don't have a server yet, the "provision" behavior will write a DB record under <code>/provisionedUsers</code>, and you can create the actual Auth user later via Firebase Console or Admin SDK.
+    </div>
+  </div>
+
+  <!-- Firebase CDN (modules) -->
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.13.2/firebase-app.js";
+    import { getAuth, onAuthStateChanged, signOut, currentUser } from "https://www.gstatic.com/firebasejs/10.13.2/firebase-auth.js";
+    import { getDatabase, ref, get, set, update, remove, onValue, query, orderByChild } from "https://www.gstatic.com/firebasejs/10.13.2/firebase-database.js";
+
+    // ====== CONFIG - copy your config here or reuse firebase-config.js contents ======
+    const firebaseConfig = {
+      apiKey: "AIzaSyC2WerQR0ns5Nb884VC3hLLUjo9zmHum4I",
+      authDomain: "device-id-fa609.firebaseapp.com",
+      databaseURL: "https://device-id-fa609-default-rtdb.asia-southeast1.firebasedatabase.app",
+      projectId: "device-id-fa609",
+      storageBucket: "device-id-fa609.firebasestorage.app",
+      messagingSenderId: "692838888581",
+      appId: "1:692838888581:web:89100b9eb9b0e75fac65ec",
+      measurementId: "G-20S0EJ950Z"
+    };
+
+    const app = initializeApp(firebaseConfig);
+    const auth = getAuth(app);
+    const db = getDatabase(app);
+
+    // ====== Admin config in UI ======
+    const adminApiEl = document.getElementById('adminApi');
+    const statusEl = document.getElementById('status');
+    const createBtn = document.getElementById('createBtn');
+    const newEmailEl = document.getElementById('newEmail');
+    const newPasswordEl = document.getElementById('newPassword');
+    const newExpiresEl = document.getElementById('newExpires');
+    const refreshBtn = document.getElementById('refreshBtn');
+    const usersTbody = document.querySelector('#usersTable tbody');
+    const filterInput = document.getElementById('filterInput');
+
+    let localAdminApi = localStorage.getItem('admin_api_url') || '';
+    adminApiEl.value = localAdminApi;
+
+    adminApiEl.addEventListener('change', e => {
+      localStorage.setItem('admin_api_url', e.target.value.trim());
+    });
+
+    // ====== Helpers ======
+    function setStatus(t){ statusEl.textContent = 'Status: ' + t; }
+
+    function isoToLocal(dt){
+      if(!dt) return '—';
+      const d = new Date(dt);
+      if(isNaN(d)) return dt;
+      return d.toLocaleString();
+    }
+
+    // ====== Auth guard: allow only admin users
+    // You should add your admin UID(s) to /admins/<uid>: true in the DB, or maintain a list in code.
+    async function checkAdminOrRedirect(){
+      // simple auth guard: require login and admin flag in DB
+      onAuthStateChanged(auth, async user => {
+        if(!user){
+          setStatus('Please sign in as admin (Firebase Auth).');
+          // redirect to login? We assume admin uses the same login.html
+          return;
+        }
+        try {
+          const adminSnap = await get(ref(db, `admins/${user.uid}`));
+          if(!adminSnap.exists() || adminSnap.val() !== true){
+            setStatus('You are not an admin. Please sign in with an admin account.');
+            console.warn('Non-admin tried to access admin panel:', user.uid);
+            // optional: sign out
+            // await signOut(auth);
+            return;
+          }
+          setStatus('Signed in as admin: ' + (user.email || user.uid));
+          // load users
+          loadUsers();
+        } catch (e) {
+          console.error(e);
+          setStatus('Auth check error');
+        }
+      });
+    }
+    checkAdminOrRedirect();
+
+    // ====== Load users list (reads /users and /devices)
+    async function loadUsers(){
+      setStatus('Loading users...');
+      usersTbody.innerHTML = '';
+      try {
+        const usersSnap = await get(ref(db, 'users'));
+        const users = usersSnap.exists() ? usersSnap.val() : {};
+        const devicesSnap = await get(ref(db, 'devices'));
+        const devices = devicesSnap.exists() ? devicesSnap.val() : {};
+        // build rows
+        const arr = Object.keys(users).map(uid => ({ uid, ...(users[uid]||{}) }));
+        // optional filter
+        const filter = (filterInput.value||'').toLowerCase();
+        arr.forEach(u => {
+          const email = u.email || '—';
+          if(filter && !email.toLowerCase().includes(filter) && !u.uid.includes(filter)) return;
+          const tr = document.createElement('tr');
+          const expires = u.expiresAt || null;
+          const devCount = (devices[u.uid] && Object.keys(devices[u.uid]).length) || 0;
+          tr.innerHTML = `
+            <td><div style="font-weight:600">${email}</div><div class="muted">${u.uid}</div></td>
+            <td>${u.approved?'<span class="small success">Approved</span>':'<span class="small">Not approved</span>'}</td>
+            <td>${expires?isoToLocal(expires):'—'}</td>
+            <td>${devCount}</td>
+            <td class="muted"></td>
+          `;
+          // actions cell
+          const actionsCell = tr.querySelector('td:last-child');
+          // Toggle approve button
+          const toggleBtn = document.createElement('button');
+          toggleBtn.textContent = u.approved ? 'Revoke' : 'Approve';
+          toggleBtn.className = 'small';
+          toggleBtn.onclick = () => toggleApprove(u.uid, !u.approved);
+          actionsCell.appendChild(toggleBtn);
+
+          // Extend button
+          const extendBtn = document.createElement('button');
+          extendBtn.textContent = 'Extend 30d';
+          extendBtn.className = 'small info';
+          extendBtn.style.marginLeft = '6px';
+          extendBtn.onclick = () => extendExpiration(u.uid, 30);
+          actionsCell.appendChild(extendBtn);
+
+          // Edit expiration input
+          const expInput = document.createElement('input');
+          expInput.type = 'datetime-local';
+          expInput.style.marginLeft = '6px';
+          expInput.className = 'small';
+          if(u.expiresAt){
+            // convert ISO to local datetime-local value
+            const d = new Date(u.expiresAt);
+            // format as yyyy-MM-ddTHH:mm
+            const pad = n => n.toString().padStart(2,'0');
+            const val = `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+            expInput.value = val;
+          }
+          actionsCell.appendChild(expInput);
+
+          const saveExpBtn = document.createElement('button');
+          saveExpBtn.textContent = 'Save';
+          saveExpBtn.className = 'small';
+          saveExpBtn.style.marginLeft = '6px';
+          saveExpBtn.onclick = () => {
+            if(!expInput.value){ alert('Pick a date'); return; }
+            const iso = new Date(expInput.value).toISOString();
+            update(ref(db, `users/${u.uid}`), { expiresAt: iso }).then(()=>{ loadUsers(); });
+          };
+          actionsCell.appendChild(saveExpBtn);
+
+          // Delete user / revoke (DB-only)
+          const delBtn = document.createElement('button');
+          delBtn.textContent = 'Remove (DB)';
+          delBtn.className = 'small danger';
+          delBtn.style.marginLeft = '6px';
+          delBtn.onclick = async () => {
+            if(!confirm('Remove user metadata from DB? This does not delete the Auth user.')) return;
+            await remove(ref(db, `users/${u.uid}`));
+            await remove(ref(db, `devices/${u.uid}`));
+            loadUsers();
+          };
+          actionsCell.appendChild(delBtn);
+
+          usersTbody.appendChild(tr);
+        });
+        setStatus('Users loaded');
+      } catch (e) {
+        console.error(e);
+        setStatus('Failed to load users');
+      }
+    }
+
+    filterInput.addEventListener('input', () => loadUsers());
+    refreshBtn.addEventListener('click', () => loadUsers());
+
+    // ====== Toggle approve
+    async function toggleApprove(uid, newState){
+      try {
+        await update(ref(db, `users/${uid}`), { approved: !!newState });
+        setStatus('Updated user ' + uid);
+        loadUsers();
+      } catch (e) {
+        console.error(e);
+        setStatus('Failed to update');
+      }
+    }
+
+    // ====== Extend expiration by N days
+    async function extendExpiration(uid, days){
+      try {
+        const snap = await get(ref(db, `users/${uid}/expiresAt`));
+        const now = new Date();
+        let base = now;
+        if(snap.exists()){
+          const current = new Date(snap.val());
+          if(!isNaN(current)) base = current;
+        }
+        const newDate = new Date(base.getTime() + days*24*60*60*1000);
+        await update(ref(db, `users/${uid}`), { expiresAt: newDate.toISOString() });
+        loadUsers();
+      } catch(e){ console.error(e); setStatus('Failed to extend'); }
+    }
+
+    // ====== Create user: uses either server API or fallback DB-provision
+    createBtn.addEventListener('click', async () => {
+      const email = (newEmailEl.value||'').trim();
+      const pwd = (newPasswordEl.value||'').trim();
+      const expiresVal = newExpiresEl.value;
+      if(!email || !pwd){ alert('Email & password required'); return; }
+      const expiresAtISO = expiresVal ? new Date(expiresVal).toISOString() : null;
+      const adminApi = (adminApiEl.value||'').trim();
+
+      setStatus('Creating user...');
+
+      if(adminApi){
+        // Server flow: POST to your admin API which should run Admin SDK
+        try {
+          const res = await fetch(adminApi, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ email, password: pwd, approved:true, expiresAt: expiresAtISO })
+          });
+          const j = await res.json();
+          if(!res.ok){ throw new Error(j?.error || JSON.stringify(j)); }
+          setStatus('User created via server: ' + (j.uid||''));
+          // refresh list
+          loadUsers();
+        } catch (e){
+          console.error(e);
+          alert('Failed server create: ' + e.message);
+          setStatus('Server create failed');
+        }
+      } else {
+        // Fallback: create a DB provision entry that an admin / server will later process
+        try {
+          const key = email.replace(/\./g,'_') + '_' + Date.now();
+          await set(ref(db, `provisionedUsers/${key}`), { email, password: pwd, approved: true, expiresAt: expiresAtISO, createdAt: new Date().toISOString() });
+          setStatus('Provisioned user in DB. Remember to create the actual Auth user in Firebase Console or with Admin SDK.');
+          loadUsers();
+        } catch(e){
+          console.error(e);
+          setStatus('Provision failed');
+        }
+      }
+    });
+
+    // Optionally: refresh automatically every minute
+    setInterval(()=>{ loadUsers(); }, 60 * 1000);
+
+    // initial load
+    // loadUsers(); // will be triggered after admin auth validated in checkAdminOrRedirect()
+
+    // ====== Optional: quick function to call server to delete Auth account (server required)
+    async function serverDeleteUser(uid){
+      const adminApi = (adminApiEl.value||'').trim();
+      if(!adminApi){ alert('No adminApi configured'); return; }
+      try {
+        const res = await fetch(adminApi + '/deleteUser', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ uid }) });
+        const j = await res.json();
+        if(!res.ok) throw new Error(j?.error || JSON.stringify(j));
+        alert('Deleted user: ' + uid);
+        loadUsers();
+      } catch(e){ alert('Delete failed: '+ e.message); }
+    }
+
+    // Expose utility to window for debugging
+    window.adminPanel = { loadUsers, extendExpiration, toggleApprove, serverDeleteUser };
+
+  </script>
+</body>
+  </html>
